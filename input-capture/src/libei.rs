@@ -525,6 +525,7 @@ static ALL_CAPABILITIES: &[DeviceCapability] = &[
     DeviceCapability::Touch,
     DeviceCapability::Scroll,
     DeviceCapability::Button,
+    DeviceCapability::Gesture,
 ];
 
 async fn handle_ei_event(
@@ -536,7 +537,8 @@ async fn handle_ei_event(
 ) -> Result<(), CaptureError> {
     match ei_event {
         EiEvent::SeatAdded(s) => {
-            s.seat.bind_capabilities(ALL_CAPABILITIES);
+            let caps = BitFlags::from_iter(ALL_CAPABILITIES.iter().copied());
+            s.seat.bind_capabilities(caps);
             context.flush().map_err(|e| io::Error::new(e.kind(), e))?;
         }
         EiEvent::SeatRemoved(_) | /* EiEvent::DeviceAdded(_) | */ EiEvent::DeviceRemoved(_) => {
@@ -552,8 +554,18 @@ async fn handle_ei_event(
         _ => {
             if let Some(pos) = current_client {
                 for event in Event::from_ei_event(ei_event) {
-                    event_tx.send((pos, CaptureEvent::Input(event))).await.expect("no channel");
+                    // Log gesture events specifically
+                    if matches!(event, Event::Gesture(_)) {
+                        log::info!("🎯 [CAPTURE] Captured gesture event: {:?}", event);
+                    }
+                    event_tx
+                        .send((pos, CaptureEvent::Input(event)))
+                        .await
+                        .expect("no channel");
                 }
+            } else {
+                // Log when we receive events but no client is active
+                log::trace!("Event received but no current_client: {:?}", ei_event);
             }
         }
     }

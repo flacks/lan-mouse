@@ -3,7 +3,7 @@ use reis::{
     event::EiEvent,
 };
 
-use crate::{Event, KeyboardEvent, PointerEvent};
+use crate::{Event, GestureEvent, KeyboardEvent, PointerEvent};
 
 impl Event {
     pub fn from_ei_event(ei_event: EiEvent) -> impl Iterator<Item = Self> {
@@ -127,6 +127,25 @@ fn to_input_events(ei_event: EiEvent) -> Events {
                 Events::None
             }
         }
+        EiEvent::GestureSwipeBegin(gesture) => Events::One(Event::Gesture(
+            GestureEvent::SwipeBegin {
+                time: gesture.time as u32,
+                fingers: gesture.fingers as u8,
+            },
+        )),
+        EiEvent::GestureSwipeUpdate(gesture) => Events::One(Event::Gesture(
+            GestureEvent::SwipeUpdate {
+                time: gesture.time as u32,
+                dx: gesture.dx as f64,
+                dy: gesture.dy as f64,
+            },
+        )),
+        EiEvent::GestureSwipeEnd(gesture) => Events::One(Event::Gesture(
+            GestureEvent::SwipeEnd {
+                time: gesture.time as u32,
+                cancelled: gesture.cancelled,
+            },
+        )),
         EiEvent::KeyboardKey(key) => {
             let key_event = KeyboardEvent::Key {
                 key: key.key,

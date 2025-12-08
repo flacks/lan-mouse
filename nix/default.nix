@@ -35,7 +35,12 @@ rustPlatform.buildRustPackage {
     path = lib.cleanSource ../.;
   };
 
-  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    outputHashes = {
+      "reis-0.5.0" = "sha256-Ovc0fB5kPah/rUkBzcROQGS6kCuFxjWl8jS6i9rC08I=";
+    };
+  };
 
   # Set Environment Variables
   RUST_BACKTRACE = "full";

@@ -1,4 +1,4 @@
-use input_event::{Event as InputEvent, KeyboardEvent, PointerEvent};
+use input_event::{Event as InputEvent, GestureEvent, KeyboardEvent, PointerEvent};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use paste::paste;
 use std::{
@@ -93,6 +93,9 @@ pub enum EventType {
     PointerAxisValue120,
     KeyboardKey,
     KeyboardModifiers,
+    GestureSwipeBegin,
+    GestureSwipeUpdate,
+    GestureSwipeEnd,
     Ping,
     Pong,
     Enter,
@@ -113,6 +116,11 @@ impl ProtoEvent {
                 InputEvent::Keyboard(k) => match k {
                     KeyboardEvent::Key { .. } => EventType::KeyboardKey,
                     KeyboardEvent::Modifiers { .. } => EventType::KeyboardModifiers,
+                },
+                InputEvent::Gesture(g) => match g {
+                    GestureEvent::SwipeBegin { .. } => EventType::GestureSwipeBegin,
+                    GestureEvent::SwipeUpdate { .. } => EventType::GestureSwipeUpdate,
+                    GestureEvent::SwipeEnd { .. } => EventType::GestureSwipeEnd,
                 },
             },
             ProtoEvent::Ping => EventType::Ping,
@@ -169,6 +177,25 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
                     group: decode_u32(&mut buf)?,
                 },
             ))),
+            EventType::GestureSwipeBegin => {
+                Ok(Self::Input(InputEvent::Gesture(GestureEvent::SwipeBegin {
+                    time: decode_u32(&mut buf)?,
+                    fingers: decode_u8(&mut buf)?,
+                })))
+            }
+            EventType::GestureSwipeUpdate => Ok(Self::Input(InputEvent::Gesture(
+                GestureEvent::SwipeUpdate {
+                    time: decode_u32(&mut buf)?,
+                    dx: decode_f64(&mut buf)?,
+                    dy: decode_f64(&mut buf)?,
+                },
+            ))),
+            EventType::GestureSwipeEnd => {
+                Ok(Self::Input(InputEvent::Gesture(GestureEvent::SwipeEnd {
+                    time: decode_u32(&mut buf)?,
+                    cancelled: decode_u8(&mut buf)? != 0,
+                })))
+            }
             EventType::Ping => Ok(Self::Ping),
             EventType::Pong => Ok(Self::Pong(decode_u8(&mut buf)? != 0)),
             EventType::Enter => Ok(Self::Enter(decode_u8(&mut buf)?.try_into()?)),
@@ -230,6 +257,21 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                             encode_u32(buf, len, latched);
                             encode_u32(buf, len, locked);
                             encode_u32(buf, len, group);
+                        }
+                    },
+                    InputEvent::Gesture(g) => match g {
+                        GestureEvent::SwipeBegin { time, fingers } => {
+                            encode_u32(buf, len, time);
+                            encode_u8(buf, len, fingers);
+                        }
+                        GestureEvent::SwipeUpdate { time, dx, dy } => {
+                            encode_u32(buf, len, time);
+                            encode_f64(buf, len, dx);
+                            encode_f64(buf, len, dy);
+                        }
+                        GestureEvent::SwipeEnd { time, cancelled } => {
+                            encode_u32(buf, len, time);
+                            encode_u8(buf, len, cancelled as u8);
                         }
                     },
                 },

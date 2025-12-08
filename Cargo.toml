@@ -96,3 +96,6 @@ evdev_emulation = ["input-emulation/evdev"]
 name = "Lan Mouse"
 icon = ["target/icon.icns"]
 identifier = "de.feschber.LanMouse"
+
+[patch.crates-io]
+reis = { git = "https://github.com/flacks/reis.git", branch = "feature/gesture-bypass" }

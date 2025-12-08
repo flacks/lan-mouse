@@ -245,6 +245,7 @@ impl VirtualInput {
                         .modifiers(mods_depressed, mods_latched, mods_locked, group);
                 }
             },
+            Event::Gesture(_) => {}
         }
         Ok(())
     }

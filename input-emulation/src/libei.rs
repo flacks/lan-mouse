@@ -1,3 +1,4 @@
+use ashpd::enumflags2::BitFlags;
 use futures::{StreamExt, future};
 use std::{
     io,
@@ -203,6 +204,7 @@ impl Emulation for LibeiEmulation<'_> {
                 }
                 KeyboardEvent::Modifiers { .. } => {}
             },
+            Event::Gesture(_) => {}
         }
         self.context
             .flush()
@@ -254,6 +256,7 @@ async fn ei_event_handler(
             DeviceCapability::Touch,
             DeviceCapability::Scroll,
             DeviceCapability::Button,
+            DeviceCapability::Gesture,
         ];
         log::debug!("{event:?}");
         match event {
@@ -262,7 +265,8 @@ async fn ei_event_handler(
                 return Err(EmulationError::EndOfStream);
             }
             EiEvent::SeatAdded(e) => {
-                e.seat().bind_capabilities(CAPABILITIES);
+                let caps = BitFlags::from_iter(CAPABILITIES.iter().copied());
+                e.seat().bind_capabilities(caps);
             }
             EiEvent::SeatRemoved(e) => {
                 log::debug!("seat removed: {:?}", e.seat());
@@ -270,7 +274,7 @@ async fn ei_event_handler(
             EiEvent::DeviceAdded(e) => {
                 let device_type = e.device().device_type();
                 log::debug!("device added: {device_type:?}");
-                e.device().device();
+                let _ = e.device().device();
                 let device = e.device();
                 if let Some(pointer) = e.device().interface::<Pointer>() {
                     devices

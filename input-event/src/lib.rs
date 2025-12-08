@@ -26,6 +26,16 @@ pub enum PointerEvent {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
+pub enum GestureEvent {
+    /// touchpad swipe begin
+    SwipeBegin { time: u32, fingers: u8 },
+    /// touchpad swipe update (delta in logical units)
+    SwipeUpdate { time: u32, dx: f64, dy: f64 },
+    /// touchpad swipe end
+    SwipeEnd { time: u32, cancelled: bool },
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum KeyboardEvent {
     /// a key press / release event
     Key { time: u32, key: u32, state: u8 },
@@ -44,6 +54,8 @@ pub enum Event {
     Pointer(PointerEvent),
     /// keyboard events (key / modifiers)
     Keyboard(KeyboardEvent),
+    /// gesture events (currently touchpad swipe)
+    Gesture(GestureEvent),
 }
 
 impl Display for PointerEvent {
@@ -76,6 +88,22 @@ impl Display for PointerEvent {
             } => write!(f, "scroll({axis}, {value})"),
             PointerEvent::AxisDiscrete120 { axis, value } => {
                 write!(f, "scroll-120 ({axis}, {value})")
+            }
+        }
+    }
+}
+
+impl Display for GestureEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GestureEvent::SwipeBegin { time: _, fingers } => {
+                write!(f, "gesture-swipe-begin({fingers})")
+            }
+            GestureEvent::SwipeUpdate { time: _, dx, dy } => {
+                write!(f, "gesture-swipe-update({dx},{dy})")
+            }
+            GestureEvent::SwipeEnd { time: _, cancelled } => {
+                write!(f, "gesture-swipe-end(cancelled={cancelled})")
             }
         }
     }
@@ -114,6 +142,7 @@ impl Display for Event {
         match self {
             Event::Pointer(p) => write!(f, "{p}"),
             Event::Keyboard(k) => write!(f, "{k}"),
+            Event::Gesture(g) => write!(f, "{g}"),
         }
     }
 }

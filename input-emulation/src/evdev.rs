@@ -1,26 +1,61 @@
 use async_trait::async_trait;
 use evdev::{
-    AttributeSet, BusType, InputId, KeyCode, PropType, RelativeAxisCode, uinput::VirtualDevice,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, InputId, KeyCode, PropType,
+    RelativeAxisCode, UinputAbsSetup, uinput::VirtualDevice,
 };
-use input_event::{KeyboardEvent, PointerEvent};
+use input_event::{GestureEvent, KeyboardEvent, PointerEvent};
 
 use crate::{Emulation, EmulationError, EmulationHandle, error::EvdevEmulationCreationError};
 
 const WHEEL_SENSITIVITY: f64 = 3.0;
+// Scale down pointer motion so libinput acceleration works in a reasonable range
+// Lower value = slower base speed (libinput will apply acceleration on top)
+const POINTER_MOTION_SCALE: f64 = 0.5;
+
+// Virtual touchpad dimensions (logical units)
+const TOUCHPAD_WIDTH: i32 = 1000;
+const TOUCHPAD_HEIGHT: i32 = 600;
+
+// Gesture state tracking
+struct GestureState {
+    active: bool,
+    fingers: u8,
+    // Current position for each finger (x, y)
+    positions: [(f64, f64); 5],
+}
+
+impl GestureState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            fingers: 0,
+            positions: [(TOUCHPAD_WIDTH as f64 / 2.0, TOUCHPAD_HEIGHT as f64 / 2.0); 5],
+        }
+    }
+}
 
 pub(crate) struct EvdevEmulation {
-    dev: VirtualDevice,
+    mouse_dev: VirtualDevice,
+    touchpad_dev: VirtualDevice,
+    gesture_state: Box<GestureState>,
 }
 
 impl EvdevEmulation {
     pub fn new() -> Result<Self, EvdevEmulationCreationError> {
-        let dev = VirtualDevice::builder()?
+        log::info!("Creating evdev emulation devices...");
+        
+        // Create pointer device that acts like a touchpad for libinput acceleration
+        // but uses relative motion like a mouse (not absolute position)
+        let mouse_dev = VirtualDevice::builder()?
             .name("lan-mouse")
-            // identify as a USB mouse so libinput applies pointer settings
+            // identify as a USB touchpad so libinput applies pointer acceleration
             .input_id(InputId::new(BusType(0x03), 0x1234, 0x5678, 0x0001))
             .with_properties(&AttributeSet::from_iter([PropType::POINTER]))?
-            // BTN_LEFT/RIGHT/WHEEL must be enabled for relative motion
-            .with_keys(&AttributeSet::from_iter(ALL_KEYS))?
+            // All keys including touchpad buttons so libinput detects it as touchpad
+            .with_keys(&AttributeSet::from_iter(ALL_KEYS.iter().chain(&[
+                KeyCode::BTN_TOUCH,
+                KeyCode::BTN_TOOL_FINGER,
+            ]).copied()))?
             .with_relative_axes(&AttributeSet::from_iter([
                 RelativeAxisCode::REL_X,
                 RelativeAxisCode::REL_Y,
@@ -30,7 +65,49 @@ impl EvdevEmulation {
                 RelativeAxisCode::REL_HWHEEL_HI_RES,
             ]))?
             .build()?;
-        Ok(EvdevEmulation { dev })
+        log::info!("✓ Created lan-mouse device (pointer with touchpad acceleration)");
+
+        // Create separate touchpad device only for multitouch gestures
+        let touchpad_dev = VirtualDevice::builder()?
+            .name("lan-mouse-gestures")
+            // identify as a USB touchpad
+            .input_id(InputId::new(BusType(0x03), 0x1234, 0x5679, 0x0001))
+            .with_properties(&AttributeSet::from_iter([PropType::POINTER]))?
+            // Only touchpad gesture buttons, no regular mouse buttons
+            .with_keys(&AttributeSet::from_iter([
+                KeyCode::BTN_TOUCH,
+                KeyCode::BTN_TOOL_FINGER,
+                KeyCode::BTN_TOOL_DOUBLETAP,
+                KeyCode::BTN_TOOL_TRIPLETAP,
+                KeyCode::BTN_TOOL_QUADTAP,
+                KeyCode::BTN_TOOL_QUINTTAP,
+            ]))?
+            // Multitouch axes (Protocol B) - no relative axes
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_SLOT,
+                AbsInfo::new(0, 0, 4, 0, 0, 1),
+            ))?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                AbsInfo::new(0, -1, 65535, 0, 0, 1),
+            ))?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_POSITION_X,
+                AbsInfo::new(0, 0, TOUCHPAD_WIDTH, 0, 0, 10),
+            ))?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                AbsInfo::new(0, 0, TOUCHPAD_HEIGHT, 0, 0, 10),
+            ))?
+            .build()?;
+        log::info!("✓ Created lan-mouse-gestures device (multitouch only)");
+
+        log::info!("Evdev emulation ready: pointer + gestures");
+        Ok(EvdevEmulation {
+            mouse_dev,
+            touchpad_dev,
+            gesture_state: Box::new(GestureState::new()),
+        })
     }
 }
 
@@ -39,14 +116,19 @@ impl Emulation for EvdevEmulation {
     async fn consume(
         &mut self,
         event: input_event::Event,
-        _: EmulationHandle,
+        handle: EmulationHandle,
     ) -> Result<(), EmulationError> {
         match event {
-            input_event::Event::Pointer(p) => match p {
+            input_event::Event::Pointer(p) => {
+                log::trace!("[evdev] Pointer event: {:?}", p);
+                match p {
                 PointerEvent::Motion { time: _, dx, dy } => {
-                    self.dev.emit(&[
-                        *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_X, dx.round() as i32),
-                        *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_Y, dy.round() as i32),
+                    // Scale motion down so libinput acceleration works in a reasonable range
+                    let scaled_dx = (dx * POINTER_MOTION_SCALE).round() as i32;
+                    let scaled_dy = (dy * POINTER_MOTION_SCALE).round() as i32;
+                    self.mouse_dev.emit(&[
+                        *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_X, scaled_dx),
+                        *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_Y, scaled_dy),
                     ])?;
                 }
                 PointerEvent::Button {
@@ -54,7 +136,7 @@ impl Emulation for EvdevEmulation {
                     button,
                     state,
                 } => {
-                    self.dev
+                    self.mouse_dev
                         .emit(&[*evdev::KeyEvent::new(KeyCode(button as u16), state as i32)])?;
                 }
                 PointerEvent::Axis {
@@ -81,7 +163,7 @@ impl Emulation for EvdevEmulation {
                         (hi_res - 60) / 120
                     };
 
-                    self.dev.emit(&[
+                    self.mouse_dev.emit(&[
                         *evdev::RelativeAxisEvent::new(axis_hi_res, hi_res),
                         *evdev::RelativeAxisEvent::new(axis_legacy, legacy),
                     ])?;
@@ -101,23 +183,30 @@ impl Emulation for EvdevEmulation {
                     let hi_res = value * 120;
                     let legacy = value;
 
-                    self.dev.emit(&[
+                    self.mouse_dev.emit(&[
                         *evdev::RelativeAxisEvent::new(axis_hi_res, hi_res),
                         *evdev::RelativeAxisEvent::new(axis_legacy, legacy),
                     ])?;
                 }
+                }
             },
-            input_event::Event::Keyboard(k) => match k {
+            input_event::Event::Keyboard(k) => {
+                log::trace!("[evdev] Keyboard event: {:?}", k);
+                match k {
                 KeyboardEvent::Key {
                     time: _,
                     key,
                     state,
                 } => {
-                    self.dev
+                    self.mouse_dev
                         .emit(&[*evdev::KeyEvent::new(KeyCode(key as u16), state as i32)])?;
                 }
                 KeyboardEvent::Modifiers { .. } => {}
+                }
             },
+            input_event::Event::Gesture(g) => {
+                self.handle_gesture(g)?;
+            }
         }
         Ok(())
     }
@@ -125,6 +214,167 @@ impl Emulation for EvdevEmulation {
     async fn create(&mut self, _: EmulationHandle) {}
     async fn destroy(&mut self, _: EmulationHandle) {}
     async fn terminate(&mut self) {}
+}
+
+impl EvdevEmulation {
+    fn handle_gesture(&mut self, gesture: GestureEvent) -> Result<(), EmulationError> {
+        match gesture {
+            GestureEvent::SwipeBegin { time: _, fingers } => {
+                self.swipe_begin(fingers)?;
+            }
+            GestureEvent::SwipeUpdate { time: _, dx, dy } => {
+                self.swipe_update(dx, dy)?;
+            }
+            GestureEvent::SwipeEnd {
+                time: _,
+                cancelled,
+            } => {
+                self.swipe_end(cancelled)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn swipe_begin(&mut self, fingers: u8) -> Result<(), EmulationError> {
+        self.gesture_state.active = true;
+        self.gesture_state.fingers = fingers.min(5);
+
+        // Initialize finger positions in the center of the touchpad
+        for i in 0..self.gesture_state.fingers as usize {
+            self.gesture_state.positions[i] = (
+                TOUCHPAD_WIDTH as f64 / 2.0,
+                TOUCHPAD_HEIGHT as f64 / 2.0,
+            );
+        }
+        log::debug!("  Initialized {} finger positions at center ({}, {})", 
+                   self.gesture_state.fingers, TOUCHPAD_WIDTH / 2, TOUCHPAD_HEIGHT / 2);
+
+        // Emit BTN_TOUCH and BTN_TOOL_* to indicate gesture start
+        self.touchpad_dev
+            .emit(&[*evdev::KeyEvent::new(KeyCode::BTN_TOUCH, 1)])?;
+        log::debug!("  Emitted BTN_TOUCH = 1");
+
+        // Set the appropriate BTN_TOOL_* based on finger count
+        let tool_btn = match fingers {
+            1 => KeyCode::BTN_TOOL_FINGER,
+            2 => KeyCode::BTN_TOOL_DOUBLETAP,
+            3 => KeyCode::BTN_TOOL_TRIPLETAP,
+            4 => KeyCode::BTN_TOOL_QUADTAP,
+            _ => KeyCode::BTN_TOOL_QUINTTAP,
+        };
+        self.touchpad_dev
+            .emit(&[*evdev::KeyEvent::new(tool_btn, 1)])?;
+        log::debug!("  Emitted {:?} = 1", tool_btn);
+
+        // Emit multitouch events for each finger
+        for slot in 0..self.gesture_state.fingers {
+            let (x, y) = self.gesture_state.positions[slot as usize];
+
+            self.touchpad_dev.emit(&[
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_SLOT,
+                    slot as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                    slot as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_POSITION_X,
+                    x.round() as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                    y.round() as i32,
+                ),
+            ])?;
+            log::debug!("  Slot {}: tracking_id={}, pos=({}, {})", slot, slot, x.round() as i32, y.round() as i32);
+        }
+
+        Ok(())
+    }
+
+    fn swipe_update(&mut self, dx: f64, dy: f64) -> Result<(), EmulationError> {
+        if !self.gesture_state.active {
+            return Ok(());
+        }
+
+        // Update all finger positions
+        for i in 0..self.gesture_state.fingers as usize {
+            let (x, y) = &mut self.gesture_state.positions[i];
+            let old_x = *x;
+            let old_y = *y;
+            *x += dx;
+            *y += dy;
+
+            // Clamp to touchpad bounds
+            *x = x.clamp(0.0, TOUCHPAD_WIDTH as f64);
+            *y = y.clamp(0.0, TOUCHPAD_HEIGHT as f64);
+            
+            log::trace!("  Finger {}: ({:.1}, {:.1}) -> ({:.1}, {:.1})", i, old_x, old_y, *x, *y);
+        }
+
+        // Emit updated positions for all fingers
+        for slot in 0..self.gesture_state.fingers {
+            let (x, y) = self.gesture_state.positions[slot as usize];
+
+            self.touchpad_dev.emit(&[
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_SLOT,
+                    slot as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_POSITION_X,
+                    x.round() as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                    y.round() as i32,
+                ),
+            ])?;
+        }
+
+        Ok(())
+    }
+
+    fn swipe_end(&mut self, cancelled: bool) -> Result<(), EmulationError> {
+        // Release all tracking IDs
+        for slot in 0..self.gesture_state.fingers {
+            self.touchpad_dev.emit(&[
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_SLOT,
+                    slot as i32,
+                ),
+                *evdev::AbsoluteAxisEvent::new(
+                    AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                    -1,
+                ),
+            ])?;
+            log::debug!("  Released tracking ID for slot {}", slot);
+        }
+
+        // Release BTN_TOOL_* based on current finger count
+        let tool_btn = match self.gesture_state.fingers {
+            1 => KeyCode::BTN_TOOL_FINGER,
+            2 => KeyCode::BTN_TOOL_DOUBLETAP,
+            3 => KeyCode::BTN_TOOL_TRIPLETAP,
+            4 => KeyCode::BTN_TOOL_QUADTAP,
+            _ => KeyCode::BTN_TOOL_QUINTTAP,
+        };
+        self.touchpad_dev
+            .emit(&[*evdev::KeyEvent::new(tool_btn, 0)])?;
+        log::debug!("  Released {:?}", tool_btn);
+
+        // Release BTN_TOUCH
+        self.touchpad_dev
+            .emit(&[*evdev::KeyEvent::new(KeyCode::BTN_TOUCH, 0)])?;
+        log::debug!("  Released BTN_TOUCH");
+
+        self.gesture_state.active = false;
+        self.gesture_state.fingers = 0;
+
+        Ok(())
+    }
 }
 
 const ALL_KEYS: [KeyCode; 557] = [

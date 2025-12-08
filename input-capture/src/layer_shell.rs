@@ -28,6 +28,10 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::ZwpLockedPointerV1,
             zwp_pointer_constraints_v1::{Lifetime, ZwpPointerConstraintsV1},
         },
+        pointer_gestures::zv1::client::{
+            zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
+            zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
+        },
         relative_pointer::zv1::client::{
             zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
             zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
@@ -74,6 +78,7 @@ struct Globals {
     compositor: wl_compositor::WlCompositor,
     pointer_constraints: ZwpPointerConstraintsV1,
     relative_pointer_manager: ZwpRelativePointerManagerV1,
+    pointer_gestures: Option<ZwpPointerGesturesV1>,
     shortcut_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     seat: wl_seat::WlSeat,
     shm: wl_shm::WlShm,
@@ -118,6 +123,7 @@ struct State {
     keyboard: Option<WlKeyboard>,
     pointer_lock: Option<ZwpLockedPointerV1>,
     rel_pointer: Option<ZwpRelativePointerV1>,
+    gesture_swipe: Option<ZwpPointerGestureSwipeV1>,
     shortcut_inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
     active_windows: Vec<Arc<Window>>,
     focused: Option<Arc<Window>>,
@@ -129,6 +135,9 @@ struct State {
     pending_events: VecDeque<(Position, CaptureEvent)>,
     outputs: Vec<Output>,
     scroll_discrete_pending: bool,
+    // Gesture tracking
+    gesture_active: bool,
+    gesture_fingers: u8,
 }
 
 struct Inner {
@@ -298,6 +307,18 @@ impl LayerShellInputCapture {
         let relative_pointer_manager: ZwpRelativePointerManagerV1 = global_list
             .bind(&qh, 1..=1, ())
             .map_err(|e| WaylandBindError::new(e, "zwp_relative_pointer_manager_v1"))?;
+        
+        // Try to bind pointer gestures for gesture support
+        let pointer_gestures: Result<ZwpPointerGesturesV1, WaylandBindError> = global_list
+            .bind(&qh, 1..=3, ())
+            .map_err(|e| WaylandBindError::new(e, "zwp_pointer_gestures_v1"));
+        if let Err(e) = &pointer_gestures {
+            log::warn!("pointer_gestures not supported: {e}\nGestures will not be captured");
+        } else {
+            log::info!("✅ pointer_gestures protocol bound successfully");
+        }
+        let pointer_gestures = pointer_gestures.ok();
+        
         let shortcut_inhibit_manager: Result<
             ZwpKeyboardShortcutsInhibitManagerV1,
             WaylandBindError,
@@ -323,11 +344,13 @@ impl LayerShellInputCapture {
                 seat,
                 pointer_constraints,
                 relative_pointer_manager,
+                pointer_gestures,
                 shortcut_inhibit_manager,
                 xdg_output_manager,
             },
             pointer_lock: None,
             rel_pointer: None,
+            gesture_swipe: None,
             shortcut_inhibitor: None,
             active_windows: Vec::new(),
             focused: None,
@@ -337,6 +360,8 @@ impl LayerShellInputCapture {
             pending_events: VecDeque::new(),
             outputs: vec![],
             scroll_discrete_pending: false,
+            gesture_active: false,
+            gesture_fingers: 0,
         };
 
         for global in state.global_list.contents().clone_list() {
@@ -443,6 +468,9 @@ impl State {
         window.surface.commit();
 
         // lock pointer
+        // NOTE: Pointer lock is required for cosmic-comp to forward gesture events.
+        // When is_grabbed() returns true, cosmic-comp won't consume 3+ finger gestures
+        // for workspace switching and will forward them to the application instead.
         if self.pointer_lock.is_none() {
             self.pointer_lock = Some(self.globals.pointer_constraints.lock_pointer(
                 surface,
@@ -461,6 +489,18 @@ impl State {
                 qh,
                 (),
             ));
+        }
+
+        // request gesture input
+        if self.gesture_swipe.is_none() {
+            if let Some(pointer_gestures) = &self.globals.pointer_gestures {
+                self.gesture_swipe = Some(pointer_gestures.get_swipe_gesture(
+                    pointer,
+                    qh,
+                    (),
+                ));
+                log::info!("🎯 [LAYER-SHELL] Gesture swipe capture enabled");
+            }
         }
 
         // capture modifier keys
@@ -903,6 +943,59 @@ impl Dispatch<ZwpRelativePointerV1, ()> for State {
     }
 }
 
+impl Dispatch<ZwpPointerGestureSwipeV1, ()> for State {
+    fn event(
+        app: &mut Self,
+        _: &ZwpPointerGestureSwipeV1,
+        event: <ZwpPointerGestureSwipeV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use input_event::GestureEvent;
+        
+        if let Some(window) = &app.focused {
+            match event {
+                zwp_pointer_gesture_swipe_v1::Event::Begin { serial: _, time, surface: _, fingers } => {
+                    app.gesture_active = true;
+                    app.gesture_fingers = fingers as u8;
+                    app.pending_events.push_back((
+                        window.pos,
+                        CaptureEvent::Input(Event::Gesture(GestureEvent::SwipeBegin {
+                            time,
+                            fingers: fingers as u8,
+                        })),
+                    ));
+                }
+                zwp_pointer_gesture_swipe_v1::Event::Update { time, dx, dy } => {
+                    if app.gesture_active {
+                        app.pending_events.push_back((
+                            window.pos,
+                            CaptureEvent::Input(Event::Gesture(GestureEvent::SwipeUpdate {
+                                time,
+                                dx,
+                                dy,
+                            })),
+                        ));
+                    }
+                }
+                zwp_pointer_gesture_swipe_v1::Event::End { serial: _, time, cancelled } => {
+                    app.pending_events.push_back((
+                        window.pos,
+                        CaptureEvent::Input(Event::Gesture(GestureEvent::SwipeEnd {
+                            time,
+                            cancelled: cancelled != 0,
+                        })),
+                    ));
+                    app.gesture_active = false;
+                    app.gesture_fingers = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
     fn event(
         app: &mut Self,
@@ -1023,6 +1116,7 @@ delegate_noop!(State: wl_shm_pool::WlShmPool);
 delegate_noop!(State: wl_compositor::WlCompositor);
 delegate_noop!(State: ZwlrLayerShellV1);
 delegate_noop!(State: ZwpRelativePointerManagerV1);
+delegate_noop!(State: ZwpPointerGesturesV1);
 delegate_noop!(State: ZwpKeyboardShortcutsInhibitManagerV1);
 delegate_noop!(State: ZwpPointerConstraintsV1);
 

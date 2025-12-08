@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use input_event::{
     Event::{Keyboard, Pointer},
-    KeyboardEvent, PointerEvent,
+    PointerEvent,
 };
 
 use crate::error::EmulationError;
@@ -105,26 +105,10 @@ impl Emulation for DesktopPortalEmulation<'_> {
                         .await?;
                 }
             },
-            Keyboard(k) => {
-                match k {
-                    KeyboardEvent::Key {
-                        time: _,
-                        key,
-                        state,
-                    } => {
-                        let state = match state {
-                            0 => KeyState::Released,
-                            _ => KeyState::Pressed,
-                        };
-                        self.proxy
-                            .notify_keyboard_keycode(&self.session, key as i32, state)
-                            .await?;
-                    }
-                    KeyboardEvent::Modifiers { .. } => {
-                        // ignore
-                    }
-                }
+            Keyboard(_) => {
+                log::warn!("desktop portal input emulation not implemented for {:?}", event);
             }
+            input_event::Event::Gesture(_) => {}
         }
         Ok(())
     }

@@ -346,10 +346,12 @@ impl CaptureTask {
 
         let event = match event {
             CaptureEvent::Begin => ProtoEvent::Enter(opposite_pos),
-            CaptureEvent::Input(e) => match self.state {
-                // connection not acknowledged, repeat `Enter` event
-                State::WaitingForAck => ProtoEvent::Enter(opposite_pos),
-                State::Sending => ProtoEvent::Input(e),
+            CaptureEvent::Input(e) => {
+                match self.state {
+                    // connection not acknowledged, repeat `Enter` event
+                    State::WaitingForAck => ProtoEvent::Enter(opposite_pos),
+                    State::Sending => ProtoEvent::Input(e),
+                }
             },
         };
 
