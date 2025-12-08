@@ -1,8 +1,10 @@
 use async_trait::async_trait;
-use evdev::{uinput::VirtualDevice, AttributeSet, KeyCode, RelativeAxisCode};
+use evdev::{
+    AttributeSet, BusType, InputId, KeyCode, PropType, RelativeAxisCode, uinput::VirtualDevice,
+};
 use input_event::{KeyboardEvent, PointerEvent};
 
-use crate::{error::EvdevEmulationCreationError, Emulation, EmulationError, EmulationHandle};
+use crate::{Emulation, EmulationError, EmulationHandle, error::EvdevEmulationCreationError};
 
 const WHEEL_SENSITIVITY: f64 = 3.0;
 
@@ -14,7 +16,10 @@ impl EvdevEmulation {
     pub fn new() -> Result<Self, EvdevEmulationCreationError> {
         let dev = VirtualDevice::builder()?
             .name("lan-mouse")
-            // BTN_LEFT, BTN_RIGHT or BTN_WHEEL must be enabled in order to emit mouse movement events
+            // identify as a USB mouse so libinput applies pointer settings
+            .input_id(InputId::new(BusType(0x03), 0x1234, 0x5678, 0x0001))
+            .with_properties(&AttributeSet::from_iter([PropType::POINTER]))?
+            // BTN_LEFT/RIGHT/WHEEL must be enabled for relative motion
             .with_keys(&AttributeSet::from_iter(ALL_KEYS))?
             .with_relative_axes(&AttributeSet::from_iter([
                 RelativeAxisCode::REL_X,
@@ -57,20 +62,49 @@ impl Emulation for EvdevEmulation {
                     axis,
                     value,
                 } => {
-                    let axis = match axis {
-                        0 => RelativeAxisCode::REL_WHEEL_HI_RES,
-                        _ => RelativeAxisCode::REL_HWHEEL_HI_RES,
+                    let (axis_hi_res, axis_legacy) = match axis {
+                        0 => (
+                            RelativeAxisCode::REL_WHEEL_HI_RES,
+                            RelativeAxisCode::REL_WHEEL,
+                        ),
+                        _ => (
+                            RelativeAxisCode::REL_HWHEEL_HI_RES,
+                            RelativeAxisCode::REL_HWHEEL,
+                        ),
                     };
-                    self.dev
-                        .emit(&[*evdev::RelativeAxisEvent::new(axis, (value * WHEEL_SENSITIVITY).round() as i32)])?;
+
+                    let hi_res = (value * WHEEL_SENSITIVITY).round() as i32;
+                    // map hi-res ticks to legacy wheel steps (~120 units per detent)
+                    let legacy = if hi_res >= 0 {
+                        (hi_res + 60) / 120
+                    } else {
+                        (hi_res - 60) / 120
+                    };
+
+                    self.dev.emit(&[
+                        *evdev::RelativeAxisEvent::new(axis_hi_res, hi_res),
+                        *evdev::RelativeAxisEvent::new(axis_legacy, legacy),
+                    ])?;
                 }
                 PointerEvent::AxisDiscrete120 { axis, value } => {
-                    let axis = match axis {
-                        0 => RelativeAxisCode::REL_WHEEL_HI_RES,
-                        _ => RelativeAxisCode::REL_HWHEEL_HI_RES,
+                    let (axis_hi_res, axis_legacy) = match axis {
+                        0 => (
+                            RelativeAxisCode::REL_WHEEL_HI_RES,
+                            RelativeAxisCode::REL_WHEEL,
+                        ),
+                        _ => (
+                            RelativeAxisCode::REL_HWHEEL_HI_RES,
+                            RelativeAxisCode::REL_HWHEEL,
+                        ),
                     };
-                    self.dev
-                        .emit(&[*evdev::RelativeAxisEvent::new(axis, value)])?;
+
+                    let hi_res = value * 120;
+                    let legacy = value;
+
+                    self.dev.emit(&[
+                        *evdev::RelativeAxisEvent::new(axis_hi_res, hi_res),
+                        *evdev::RelativeAxisEvent::new(axis_legacy, legacy),
+                    ])?;
                 }
             },
             input_event::Event::Keyboard(k) => match k {
@@ -93,7 +127,7 @@ impl Emulation for EvdevEmulation {
     async fn terminate(&mut self) {}
 }
 
-const ALL_KEYS: [KeyCode; 549] = [
+const ALL_KEYS: [KeyCode; 557] = [
     // KeyCode::KEY_RESERVED,
     KeyCode::KEY_ESC,
     KeyCode::KEY_1,
@@ -165,6 +199,14 @@ const ALL_KEYS: [KeyCode; 549] = [
     KeyCode::KEY_F10,
     KeyCode::KEY_NUMLOCK,
     KeyCode::KEY_SCROLLLOCK,
+    KeyCode::BTN_LEFT,
+    KeyCode::BTN_RIGHT,
+    KeyCode::BTN_MIDDLE,
+    KeyCode::BTN_SIDE,
+    KeyCode::BTN_EXTRA,
+    KeyCode::BTN_FORWARD,
+    KeyCode::BTN_BACK,
+    KeyCode::BTN_TASK,
     KeyCode::KEY_KP7,
     KeyCode::KEY_KP8,
     KeyCode::KEY_KP9,
