@@ -70,6 +70,8 @@ pub struct Service {
     /// pointer motion scale settings for incoming connections by fingerprint
     incoming_pointer_scales: HashMap<String, f64>,
     next_trigger_handle: u64,
+    /// config for persistence
+    config: Config,
 }
 
 #[derive(Debug)]
@@ -145,8 +147,9 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
-            incoming_pointer_scales: Default::default(),
+            incoming_pointer_scales: config.incoming_pointer_scales(),
             next_trigger_handle: 0,
+            config,
         };
         Ok(service)
     }
@@ -420,6 +423,7 @@ impl Service {
     fn add_authorized_key(&mut self, desc: String, fp: String) {
         self.authorized_keys.write().expect("lock").insert(fp, desc);
         let keys = self.authorized_keys.read().expect("lock").clone();
+        self.save_config();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
     }
 
@@ -430,7 +434,22 @@ impl Service {
         // Disconnect any active incoming connections with this fingerprint
         self.disconnect_incoming_by_fingerprint(&fp);
         
+        self.save_config();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+    }
+
+    fn save_config(&mut self) {
+        // Update config with current authorized keys
+        let keys = self.authorized_keys.read().expect("lock").clone();
+        self.config.set_authorized_fingerprints(keys);
+        
+        // Update config with incoming pointer scales
+        self.config.set_incoming_pointer_scales(self.incoming_pointer_scales.clone());
+        
+        // Save to disk
+        if let Err(e) = self.config.save() {
+            log::error!("Failed to save config: {}", e);
+        }
     }
     
     fn disconnect_incoming_by_fingerprint(&mut self, fingerprint: &str) {
@@ -598,7 +617,8 @@ impl Service {
             }
         }
         
-        // TODO: Persist to config file
+        // Persist to config file
+        self.save_config();
     }
 
     fn broadcast_client(&mut self, handle: ClientHandle) {

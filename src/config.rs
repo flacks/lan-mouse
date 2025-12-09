@@ -54,6 +54,7 @@ struct ConfigToml {
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, String>>,
     pointer_motion_scale: Option<f64>,
+    incoming_pointer_scales: Option<HashMap<String, f64>>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -289,7 +290,9 @@ impl From<TomlClient> for ConfigClient {
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error(transparent)]
-    Toml(#[from] toml::de::Error),
+    TomlDe(#[from] toml::de::Error),
+    #[error(transparent)]
+    TomlSer(#[from] toml::ser::Error),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -402,5 +405,70 @@ impl Config {
         self.config_toml
             .as_ref()
             .and_then(|c| c.pointer_motion_scale)
+    }
+
+    /// update authorized fingerprints
+    pub fn set_authorized_fingerprints(&mut self, fingerprints: HashMap<String, String>) {
+        if let Some(ref mut config) = self.config_toml {
+            config.authorized_fingerprints = Some(fingerprints);
+        } else {
+            // Create new config if none exists
+            self.config_toml = Some(ConfigToml {
+                capture_backend: None,
+                emulation_backend: None,
+                port: None,
+                release_bind: None,
+                cert_path: None,
+                clients: None,
+                authorized_fingerprints: Some(fingerprints),
+                pointer_motion_scale: None,
+                incoming_pointer_scales: None,
+            });
+        }
+    }
+
+    /// update incoming pointer scales
+    pub fn set_incoming_pointer_scales(&mut self, scales: HashMap<String, f64>) {
+        if let Some(ref mut config) = self.config_toml {
+            config.incoming_pointer_scales = Some(scales);
+        } else {
+            // Create new config if none exists
+            self.config_toml = Some(ConfigToml {
+                capture_backend: None,
+                emulation_backend: None,
+                port: None,
+                release_bind: None,
+                cert_path: None,
+                clients: None,
+                authorized_fingerprints: None,
+                pointer_motion_scale: None,
+                incoming_pointer_scales: Some(scales),
+            });
+        }
+    }
+
+    /// get incoming pointer scales
+    pub fn incoming_pointer_scales(&self) -> HashMap<String, f64> {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.incoming_pointer_scales.clone())
+            .unwrap_or_default()
+    }
+
+    /// save config to disk
+    pub fn save(&self) -> Result<(), ConfigError> {
+        // Ensure the config directory exists
+        if let Some(parent) = self.config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let config_toml = self.config_toml.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "no config to save")
+        })?;
+
+        let toml_string = toml::to_string_pretty(config_toml)?;
+        fs::write(&self.config_path, toml_string)?;
+        log::info!("saved config to {:?}", self.config_path);
+        Ok(())
     }
 }
