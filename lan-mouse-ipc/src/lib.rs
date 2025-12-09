@@ -128,7 +128,8 @@ impl TryFrom<&str> for Position {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq)]
 pub struct ClientConfig {
     /// hostname of this client
     pub hostname: Option<String>,
@@ -140,6 +141,9 @@ pub struct ClientConfig {
     pub pos: Position,
     /// enter hook
     pub cmd: Option<String>,
+    /// pointer motion scale for evdev emulation (0.0 to 1.0)
+    #[serde(default)]
+    pub pointer_motion_scale: Option<f64>,
 }
 
 impl Default for ClientConfig {
@@ -150,6 +154,7 @@ impl Default for ClientConfig {
             fix_ips: Default::default(),
             pos: Default::default(),
             cmd: None,
+            pointer_motion_scale: None,
         }
     }
 }
@@ -219,7 +224,7 @@ pub enum FrontendEvent {
     ConnectionAttempt { fingerprint: String },
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum FrontendRequest {
     /// activate/deactivate client
     Activate(ClientHandle, bool),
@@ -253,6 +258,10 @@ pub enum FrontendRequest {
     RemoveAuthorizedKey(String),
     /// change the hook command
     UpdateEnterHook(u64, Option<String>),
+    /// update pointer motion scale
+    UpdatePointerMotionScale(ClientHandle, Option<f64>),
+    /// update pointer motion scale for incoming connection by fingerprint
+    UpdateIncomingPointerScale(String, f64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

@@ -67,6 +67,8 @@ pub struct Service {
     incoming_conns: HashSet<SocketAddr>,
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
+    /// pointer motion scale settings for incoming connections by fingerprint
+    incoming_pointer_scales: HashMap<String, f64>,
     next_trigger_handle: u64,
 }
 
@@ -87,6 +89,7 @@ impl Service {
                 port: client.port,
                 pos: client.pos,
                 cmd: client.enter_hook,
+                pointer_motion_scale: client.pointer_motion_scale,
             };
             let state = ClientState {
                 active: client.active,
@@ -114,6 +117,12 @@ impl Service {
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
         let capture = Capture::new(capture_backend, conn, config.release_bind());
+        
+        // Set pointer motion scale from config for evdev backend
+        if let Some(scale) = config.pointer_motion_scale() {
+            std::env::set_var("LAN_MOUSE_POINTER_SCALE", scale.to_string());
+        }
+        
         let emulation_backend = config.emulation_backend().map(|b| b.into());
         let emulation = Emulation::new(emulation_backend, listener);
 
@@ -136,6 +145,7 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
+            incoming_pointer_scales: Default::default(),
             next_trigger_handle: 0,
         };
         Ok(service)
@@ -200,6 +210,12 @@ impl Service {
             FrontendRequest::UpdateEnterHook(handle, enter_hook) => {
                 self.update_enter_hook(handle, enter_hook)
             }
+            FrontendRequest::UpdatePointerMotionScale(handle, scale) => {
+                self.update_pointer_motion_scale(handle, scale)
+            }
+            FrontendRequest::UpdateIncomingPointerScale(fingerprint, scale) => {
+                self.update_incoming_pointer_scale(fingerprint, scale)
+            }
         }
     }
 
@@ -219,6 +235,15 @@ impl Service {
                 pos,
                 fingerprint,
             } => {
+                // First check for incoming pointer scale by fingerprint, then fall back to client IP match
+                let scale = self.incoming_pointer_scales.get(&fingerprint).copied()
+                    .or_else(|| self.get_pointer_scale_for_addr(addr.ip()));
+                if let Some(s) = scale {
+                    log::info!("Applying pointer motion scale {:.2} for connection from {} ({})", s, addr, fingerprint);
+                } else {
+                    log::debug!("No custom scale configured for {} ({}), will use default", addr, fingerprint);
+                }
+                self.emulation.set_pointer_scale(addr, scale);
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
                     self.add_incoming(addr, pos, fingerprint.clone());
@@ -254,6 +279,15 @@ impl Service {
             }
             EmulationEvent::ReleaseNotify => self.capture.release(),
             EmulationEvent::Connected { addr, fingerprint } => {
+                // First check for incoming pointer scale by fingerprint, then fall back to client IP match
+                let scale = self.incoming_pointer_scales.get(&fingerprint).copied()
+                    .or_else(|| self.get_pointer_scale_for_addr(addr.ip()));
+                if let Some(s) = scale {
+                    log::info!("Applying pointer motion scale {:.2} for connection from {} ({})", s, addr, fingerprint);
+                } else {
+                    log::debug!("No custom scale configured for {} ({}), will use default", addr, fingerprint);
+                }
+                self.emulation.set_pointer_scale(addr, scale);
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }
         }
@@ -392,7 +426,35 @@ impl Service {
     fn remove_authorized_key(&mut self, fp: String) {
         self.authorized_keys.write().expect("lock").remove(&fp);
         let keys = self.authorized_keys.read().expect("lock").clone();
+        
+        // Disconnect any active incoming connections with this fingerprint
+        self.disconnect_incoming_by_fingerprint(&fp);
+        
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+    }
+    
+    fn disconnect_incoming_by_fingerprint(&mut self, fingerprint: &str) {
+        // Find all incoming connections with this fingerprint
+        let mut to_disconnect = Vec::new();
+        for (handle, incoming) in self.incoming_conn_info.iter() {
+            if incoming.fingerprint == fingerprint {
+                to_disconnect.push((*handle, incoming.addr));
+            }
+        }
+        
+        // Disconnect each one
+        for (handle, addr) in to_disconnect {
+            log::info!("Disconnecting incoming connection {} ({})", fingerprint, addr);
+            self.capture.destroy(handle);
+            self.incoming_conns.remove(&addr);
+            self.incoming_conn_info.remove(&handle);
+            // Send leave event to emulation to close the connection
+            self.emulation.send_leave_event(addr);
+            // Close the DTLS connection to prevent reconnection
+            self.emulation.close_connection(addr);
+            // Notify frontend that connection is gone
+            self.notify_frontend(FrontendEvent::IncomingDisconnected(addr));
+        }
     }
 
     fn enumerate(&mut self) {
@@ -502,6 +564,43 @@ impl Service {
         self.broadcast_client(handle);
     }
 
+    fn update_pointer_motion_scale(&mut self, handle: ClientHandle, scale: Option<f64>) {
+        log::info!("Updating pointer motion scale for client handle {}: {:?}", handle, scale);
+        self.client_manager.set_pointer_motion_scale(handle, scale);
+        
+        // Apply the scale to any active incoming connections from this client's IPs
+        if let Some((_config, state)) = self.client_manager.get_state(handle) {
+            for ip in state.ips {
+                // Find all incoming connections with this IP
+                for (_incoming_handle, incoming) in self.incoming_conn_info.iter() {
+                    if incoming.addr.ip() == ip {
+                        log::info!("Applying updated scale {:?} to active connection from {}", scale, incoming.addr);
+                        self.emulation.set_pointer_scale(incoming.addr, scale);
+                    }
+                }
+            }
+        }
+        
+        self.broadcast_client(handle);
+    }
+
+    fn update_incoming_pointer_scale(&mut self, fingerprint: String, scale: f64) {
+        log::info!("Updating pointer motion scale for incoming connection {}: {:.2}", fingerprint, scale);
+        
+        // Store the scale setting
+        self.incoming_pointer_scales.insert(fingerprint.clone(), scale);
+        
+        // Apply to any currently active incoming connection with this fingerprint
+        for (_handle, incoming) in self.incoming_conn_info.iter() {
+            if incoming.fingerprint == fingerprint {
+                log::info!("Applying scale {:.2} to active connection from {}", scale, incoming.addr);
+                self.emulation.set_pointer_scale(incoming.addr, Some(scale));
+            }
+        }
+        
+        // TODO: Persist to config file
+    }
+
     fn broadcast_client(&mut self, handle: ClientHandle) {
         let event = self
             .client_manager
@@ -535,5 +634,25 @@ impl Service {
                 Err(e) => log::warn!("{cmd}: {e}"),
             }
         });
+    }
+
+    /// Find a pointer motion scale for an incoming connection based on IP address matching
+    fn get_pointer_scale_for_addr(&self, ip: IpAddr) -> Option<f64> {
+        // Find a configured client whose resolved IPs contain this address
+        let clients = self.client_manager.get_client_states();
+        log::debug!("Looking for scale for IP {}, checking {} configured clients", ip, clients.len());
+        
+        let (handle, _config, _state) = clients
+            .into_iter()
+            .find(|(_h, _c, s)| {
+                let has_ip = s.ips.contains(&ip);
+                log::debug!("  Client handle {} has IPs: {:?}, contains {}? {}", _h, s.ips, ip, has_ip);
+                has_ip
+            })?;
+        
+        // Get the pointer motion scale for that client
+        let scale = self.client_manager.get_pointer_motion_scale(handle);
+        log::debug!("  Found matching client handle {} with scale {:?}", handle, scale);
+        scale
     }
 }

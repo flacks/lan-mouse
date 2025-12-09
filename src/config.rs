@@ -53,9 +53,10 @@ struct ConfigToml {
     cert_path: Option<PathBuf>,
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, String>>,
+    pointer_motion_scale: Option<f64>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 struct TomlClient {
     hostname: Option<String>,
     host_name: Option<String>,
@@ -64,6 +65,7 @@ struct TomlClient {
     position: Option<Position>,
     activate_on_startup: Option<bool>,
     enter_hook: Option<String>,
+    pointer_motion_scale: Option<f64>,
 }
 
 impl ConfigToml {
@@ -260,6 +262,7 @@ pub struct ConfigClient {
     pub pos: Position,
     pub active: bool,
     pub enter_hook: Option<String>,
+    pub pointer_motion_scale: Option<f64>,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -270,6 +273,7 @@ impl From<TomlClient> for ConfigClient {
         let ips = HashSet::from_iter(toml.ips.into_iter().flatten());
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
+        let pointer_motion_scale = toml.pointer_motion_scale;
         Self {
             ips,
             hostname,
@@ -277,6 +281,7 @@ impl From<TomlClient> for ConfigClient {
             pos,
             active,
             enter_hook,
+            pointer_motion_scale,
         }
     }
 }
@@ -390,5 +395,12 @@ impl Config {
             .as_ref()
             .and_then(|c| c.release_bind.clone())
             .unwrap_or(Vec::from_iter(DEFAULT_RELEASE_KEYS.iter().cloned()))
+    }
+
+    /// optional pointer motion scale override
+    pub fn pointer_motion_scale(&self) -> Option<f64> {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.pointer_motion_scale)
     }
 }

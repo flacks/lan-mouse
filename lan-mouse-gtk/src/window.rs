@@ -17,6 +17,7 @@ use lan_mouse_ipc::{
 
 use crate::{
     authorization_window::AuthorizationWindow, fingerprint_window::FingerprintWindow,
+    incoming_object::IncomingObject, incoming_row::IncomingRow,
     key_object::KeyObject, key_row::KeyRow,
 };
 
@@ -56,12 +57,24 @@ impl Window {
             .expect("Could not get authorized")
     }
 
+    fn incoming(&self) -> gio::ListStore {
+        self.imp()
+            .incoming
+            .borrow()
+            .clone()
+            .expect("Could not get incoming")
+    }
+
     fn client_by_idx(&self, idx: u32) -> Option<ClientObject> {
         self.clients().item(idx).map(|o| o.downcast().unwrap())
     }
 
     fn authorized_by_idx(&self, idx: u32) -> Option<KeyObject> {
         self.authorized().item(idx).map(|o| o.downcast().unwrap())
+    }
+
+    fn incoming_by_idx(&self, idx: u32) -> Option<IncomingObject> {
+        self.incoming().item(idx).map(|o| o.downcast().unwrap())
     }
 
     fn row_by_idx(&self, idx: i32) -> Option<ClientRow> {
@@ -95,6 +108,42 @@ impl Window {
                                 if let Some(key_obj) = window.authorized_by_idx(row.index() as u32)
                                 {
                                     window.request_fingerprint_remove(key_obj.get_fingerprint());
+                                }
+                            }
+                        ),
+                    );
+                    row.upcast()
+                }
+            ),
+        )
+    }
+
+    fn setup_incoming(&self) {
+        let store = gio::ListStore::new::<IncomingObject>();
+        self.imp().incoming.replace(Some(store));
+        let selection_model = NoSelection::new(Some(self.incoming()));
+        self.imp().incoming_list.bind_model(
+            Some(&selection_model),
+            clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[upgrade_or_panic]
+                move |obj| {
+                    let incoming_obj = obj.downcast_ref().expect("object of type `IncomingObject`");
+                    let row = window.create_incoming_row(incoming_obj);
+                    row.connect_closure(
+                        "request-pointer-scale-change",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: IncomingRow, scale: f64| {
+                                if let Some(incoming_obj) = window.incoming_by_idx(row.index() as u32) {
+                                    log::info!("Pointer scale change requested for {}: {:.2}", 
+                                              incoming_obj.fingerprint(), scale);
+                                    window.request(FrontendRequest::UpdateIncomingPointerScale(
+                                        incoming_obj.fingerprint(), scale
+                                    ));
                                 }
                             }
                         ),
@@ -267,6 +316,12 @@ impl Window {
     fn create_key_row(&self, key_object: &KeyObject) -> KeyRow {
         let row = KeyRow::new();
         row.bind(key_object);
+        row
+    }
+
+    fn create_incoming_row(&self, incoming_object: &IncomingObject) -> IncomingRow {
+        let row = IncomingRow::new();
+        row.bind(incoming_object);
         row
     }
 
@@ -457,15 +512,33 @@ impl Window {
     }
 
     pub(super) fn set_authorized_keys(&self, fingerprints: HashMap<String, String>) {
+        // Store the authorized keys map for lookups
+        self.imp().authorized_keys.replace(fingerprints.clone());
+        
         let authorized = self.authorized();
         // clear list
         authorized.remove_all();
         // insert fingerprints
-        for (fingerprint, description) in fingerprints {
-            let key_obj = KeyObject::new(description, fingerprint);
+        for (fingerprint, description) in fingerprints.iter() {
+            let key_obj = KeyObject::new(description.clone(), fingerprint.clone());
             authorized.append(&key_obj);
         }
         self.update_auth_placeholder_visibility();
+        
+        // Remove incoming connections whose fingerprints are no longer authorized
+        let incoming_store = self.incoming();
+        let mut to_remove = Vec::new();
+        for i in 0..incoming_store.n_items() {
+            if let Some(incoming_obj) = self.incoming_by_idx(i) {
+                if !fingerprints.contains_key(&incoming_obj.fingerprint()) {
+                    to_remove.push(i);
+                }
+            }
+        }
+        // Remove in reverse order to maintain indices
+        for idx in to_remove.into_iter().rev() {
+            incoming_store.remove(idx);
+        }
     }
 
     pub(super) fn set_pk_fp(&self, fingerprint: &str) {
@@ -499,5 +572,116 @@ impl Window {
         );
         window.present();
         self.imp().authorization_window.replace(Some(window));
+    }
+
+    fn incoming_idx(&self, fingerprint: &str) -> Option<usize> {
+        self.incoming()
+            .iter::<IncomingObject>()
+            .position(|i| {
+                i.ok()
+                    .map(|i| i.fingerprint() == fingerprint)
+                    .unwrap_or_default()
+            })
+    }
+
+    pub(super) fn add_incoming_connection(
+        &self,
+        fingerprint: String,
+        addr: std::net::SocketAddr,
+        position: Position,
+    ) {
+        // Check if already exists
+        if self.incoming_idx(&fingerprint).is_some() {
+            log::debug!("Incoming connection {} already exists, updating position", fingerprint);
+            if let Some(idx) = self.incoming_idx(&fingerprint) {
+                if let Some(incoming_obj) = self.incoming_by_idx(idx as u32) {
+                    incoming_obj.set_position(position.to_string());
+                }
+            }
+            return;
+        }
+
+        // Look up description from authorized keys
+        let description = self.imp()
+            .authorized_keys
+            .borrow()
+            .get(&fingerprint)
+            .cloned()
+            .unwrap_or_default();
+
+        // Calculate default scale based on screen resolution
+        let default_scale = self.calculate_default_pointer_scale();
+
+        let incoming_obj = IncomingObject::new(fingerprint, description, addr, position, default_scale);
+        self.incoming().append(&incoming_obj);
+    }
+
+    fn calculate_default_pointer_scale(&self) -> f64 {
+        use gtk::gdk::Display;
+        
+        // Get the default display
+        let display = Display::default();
+        if display.is_none() {
+            log::warn!("No display available, using default scale 1.0");
+            return 1.0;
+        }
+        let display = display.unwrap();
+        
+        // Get the primary monitor
+        let monitors = display.monitors();
+        if monitors.n_items() == 0 {
+            log::warn!("No monitors found, using default scale 1.0");
+            return 1.0;
+        }
+        
+        let monitor = monitors.item(0).and_then(|m| m.downcast::<gtk::gdk::Monitor>().ok());
+        if monitor.is_none() {
+            log::warn!("Could not get monitor, using default scale 1.0");
+            return 1.0;
+        }
+        let monitor = monitor.unwrap();
+        
+        // Get geometry
+        let geometry = monitor.geometry();
+        let width = geometry.width();
+        let height = geometry.height();
+        let scale_factor = monitor.scale_factor();
+        
+        // Calculate actual pixel dimensions
+        let actual_width = width * scale_factor;
+        let actual_height = height * scale_factor;
+        
+        log::info!("Screen resolution: {}x{} (scale factor: {})", actual_width, actual_height, scale_factor);
+        
+        // Calculate diagonal resolution in pixels
+        let diagonal_pixels = ((actual_width * actual_width + actual_height * actual_height) as f64).sqrt();
+        
+        // Heuristic: 
+        // - 1280x800 (Steam Deck) = 1509 pixels diagonal -> scale ~0.15
+        // - 1920x1080 (FHD) = 2203 pixels diagonal -> scale ~0.22
+        // - 3840x2160 (4K at 150% = 2560x1440 logical) = 4942 pixels diagonal -> scale ~0.49
+        // Formula: scale = diagonal_pixels / 10000.0
+        // Clamp between 0.1 and 1.0
+        let calculated_scale = (diagonal_pixels / 10000.0).max(0.1).min(1.0);
+        
+        log::info!("Calculated default pointer scale: {:.2}", calculated_scale);
+        calculated_scale
+    }
+
+    pub(super) fn remove_incoming_connection(&self, addr: std::net::SocketAddr) {
+        // Find by address since we don't have fingerprint in the disconnect event
+        let addr_str = addr.to_string();
+        let idx = self
+            .incoming()
+            .iter::<IncomingObject>()
+            .position(|i| {
+                i.ok()
+                    .map(|i| i.address() == addr_str)
+                    .unwrap_or_default()
+            });
+
+        if let Some(idx) = idx {
+            self.incoming().remove(idx as u32);
+        }
     }
 }

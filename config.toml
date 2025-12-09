@@ -6,6 +6,11 @@ release_bind = [ "KeyA", "KeyS", "KeyD", "KeyF" ]
 # optional port (defaults to 4242)
 port = 4242
 
+# optional pointer motion scale (defaults to 0.5)
+# Lower value = slower pointer movement (0.5 is good for 1080p displays)
+# For higher resolution displays, use lower values (e.g., 0.3 for 4K)
+# pointer_motion_scale = 0.5
+
 # list of authorized tls certificate fingerprints that
 # are accepted for incoming traffic
 [authorized_fingerprints]

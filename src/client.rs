@@ -206,6 +206,21 @@ impl ClientManager {
         }
     }
 
+    /// update the pointer motion scale of the client
+    pub(crate) fn set_pointer_motion_scale(&self, handle: ClientHandle, scale: Option<f64>) {
+        if let Some((c, _s)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            c.pointer_motion_scale = scale;
+        }
+    }
+
+    /// get the pointer motion scale
+    pub(crate) fn get_pointer_motion_scale(&self, handle: ClientHandle) -> Option<f64> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.pointer_motion_scale)
+    }
+
     /// set resolving status of the client
     pub(crate) fn set_resolving(&self, handle: ClientHandle, status: bool) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {

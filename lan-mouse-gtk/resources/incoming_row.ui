@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+	<requires lib="gtk" version="4.0"/>
+	<requires lib="Adw" version="1.0"/>
+	<template class="IncomingRow" parent="AdwExpanderRow">
+		<property name="title">Incoming Connection</property>
+		<!-- pointer motion scale -->
+		<child>
+			<object class="AdwActionRow" id="pointer_scale_row">
+				<property name="title">pointer motion scale</property>
+				<property name="subtitle">adjust pointer speed for this connection (evdev only)</property>
+				<child>
+					<object class="GtkScale" id="pointer_scale">
+						<property name="adjustment">
+							<object class="GtkAdjustment">
+								<property name="lower">0.0</property>
+								<property name="upper">1.0</property>
+								<property name="step-increment">0.01</property>
+								<property name="page-increment">0.1</property>
+								<property name="value">0.5</property>
+							</object>
+						</property>
+						<property name="draw-value">true</property>
+						<property name="value-pos">right</property>
+						<property name="digits">2</property>
+						<property name="hexpand">true</property>
+						<property name="valign">center</property>
+						<property name="width-request">200</property>
+					</object>
+				</child>
+			</object>
+		</child>
+	</template>
+</interface>

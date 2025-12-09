@@ -221,6 +221,11 @@ impl InputEmulation {
             .is_some_and(|p| !p.is_empty())
     }
 
+    /// Set pointer motion scale for a specific handle (evdev only)
+    pub fn set_pointer_motion_scale(&mut self, handle: EmulationHandle, scale: Option<f64>) {
+        self.emulation.set_pointer_motion_scale(handle, scale);
+    }
+
     /// update the pressed_keys for the given handle
     /// returns whether the event should be processed
     fn update_pressed_keys(&mut self, handle: EmulationHandle, key: u32, state: u8) -> bool {
@@ -248,4 +253,8 @@ trait Emulation: Send {
     async fn create(&mut self, handle: EmulationHandle);
     async fn destroy(&mut self, handle: EmulationHandle);
     async fn terminate(&mut self);
+    /// Set pointer motion scale for a specific handle (evdev only)
+    fn set_pointer_motion_scale(&mut self, _handle: EmulationHandle, _scale: Option<f64>) {
+        // Default implementation does nothing (most backends don't support this)
+    }
 }

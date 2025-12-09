@@ -2,6 +2,8 @@ mod authorization_window;
 mod client_object;
 mod client_row;
 mod fingerprint_window;
+mod incoming_object;
+mod incoming_row;
 mod key_object;
 mod key_row;
 mod window;
@@ -157,14 +159,16 @@ fn build_ui(app: &Application) {
                         window.show_toast(format!("device connected: {addr}").as_str());
                     }
                     FrontendEvent::DeviceEntered {
-                        fingerprint: _,
+                        fingerprint,
                         addr,
                         pos,
                     } => {
                         window.show_toast(format!("device entered: {addr} ({pos})").as_str());
+                        window.add_incoming_connection(fingerprint, addr, pos);
                     }
                     FrontendEvent::IncomingDisconnected(addr) => {
                         window.show_toast(format!("{addr} disconnected").as_str());
+                        window.remove_incoming_connection(addr);
                     }
                 }
             }

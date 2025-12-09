@@ -4,13 +4,19 @@ use evdev::{
     RelativeAxisCode, UinputAbsSetup, uinput::VirtualDevice,
 };
 use input_event::{GestureEvent, KeyboardEvent, PointerEvent};
+use std::collections::HashMap;
 
 use crate::{Emulation, EmulationError, EmulationHandle, error::EvdevEmulationCreationError};
 
 const WHEEL_SENSITIVITY: f64 = 3.0;
-// Scale down pointer motion so libinput acceleration works in a reasonable range
-// Lower value = slower base speed (libinput will apply acceleration on top)
-const POINTER_MOTION_SCALE: f64 = 0.5;
+
+// Get pointer motion scale from environment or use default
+fn get_pointer_motion_scale() -> f64 {
+    std::env::var("LAN_MOUSE_POINTER_SCALE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.5)
+}
 
 // Virtual touchpad dimensions (logical units)
 const TOUCHPAD_WIDTH: i32 = 1000;
@@ -38,6 +44,8 @@ pub(crate) struct EvdevEmulation {
     mouse_dev: VirtualDevice,
     touchpad_dev: VirtualDevice,
     gesture_state: Box<GestureState>,
+    pointer_motion_scale: f64,
+    per_handle_scales: HashMap<EmulationHandle, f64>,
 }
 
 impl EvdevEmulation {
@@ -102,11 +110,14 @@ impl EvdevEmulation {
             .build()?;
         log::info!("✓ Created lan-mouse-gestures device (multitouch only)");
 
-        log::info!("Evdev emulation ready: pointer + gestures");
+        let pointer_motion_scale = get_pointer_motion_scale();
+        log::info!("Evdev emulation ready: pointer + gestures (default motion scale: {:.2})", pointer_motion_scale);
         Ok(EvdevEmulation {
             mouse_dev,
             touchpad_dev,
             gesture_state: Box::new(GestureState::new()),
+            pointer_motion_scale,
+            per_handle_scales: HashMap::new(),
         })
     }
 }
@@ -123,9 +134,13 @@ impl Emulation for EvdevEmulation {
                 log::trace!("[evdev] Pointer event: {:?}", p);
                 match p {
                 PointerEvent::Motion { time: _, dx, dy } => {
+                    // Get per-handle scale or use default
+                    let scale = self.per_handle_scales.get(&handle).copied().unwrap_or(self.pointer_motion_scale);
                     // Scale motion down so libinput acceleration works in a reasonable range
-                    let scaled_dx = (dx * POINTER_MOTION_SCALE).round() as i32;
-                    let scaled_dy = (dy * POINTER_MOTION_SCALE).round() as i32;
+                    let scaled_dx = (dx * scale).round() as i32;
+                    let scaled_dy = (dy * scale).round() as i32;
+                    log::trace!("[evdev] Motion: handle={}, scale={:.2}, dx={}->{}, dy={}->{}", 
+                               handle, scale, dx, scaled_dx, dy, scaled_dy);
                     self.mouse_dev.emit(&[
                         *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_X, scaled_dx),
                         *evdev::RelativeAxisEvent::new(RelativeAxisCode::REL_Y, scaled_dy),
@@ -214,6 +229,16 @@ impl Emulation for EvdevEmulation {
     async fn create(&mut self, _: EmulationHandle) {}
     async fn destroy(&mut self, _: EmulationHandle) {}
     async fn terminate(&mut self) {}
+
+    fn set_pointer_motion_scale(&mut self, handle: EmulationHandle, scale: Option<f64>) {
+        if let Some(scale) = scale {
+            log::debug!("Setting pointer motion scale for handle {}: {:.2}", handle, scale);
+            self.per_handle_scales.insert(handle, scale);
+        } else {
+            log::debug!("Clearing pointer motion scale for handle {}, using default", handle);
+            self.per_handle_scales.remove(&handle);
+        }
+    }
 }
 
 impl EvdevEmulation {

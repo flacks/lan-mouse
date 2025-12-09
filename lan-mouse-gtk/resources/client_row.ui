@@ -69,6 +69,7 @@
 				</property>
 			</object>
 		</child>
+		<!-- pointer motion scale (evdev only) -->
 		<!-- delete button -->
 		<child>
 			<object class="AdwActionRow" id="delete_row">

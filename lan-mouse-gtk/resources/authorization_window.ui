@@ -32,7 +32,7 @@
               <object class="GtkLabel">
                 <property name="label">An unauthorized Device is trying to connect. Do you want to authorize this Device?</property>
                 <property name="width-request">100</property>
-                <property name="wrap">word-wrap</property>
+                <property name="wrap">true</property>
               </object>
             </child>
             <child>

@@ -233,7 +233,26 @@
                     </child>
                     <child>
                       <object class="AdwPreferencesGroup">
-                        <property name="title" translatable="yes">Incoming Connections</property>
+                        <property name="title" translatable="yes">Active Incoming Connections</property>
+                        <child>
+                          <object class="GtkListBox" id="incoming_list">
+                            <property name="selection-mode">none</property>
+                            <child type="placeholder">
+                              <object class="AdwActionRow" id="incoming_placeholder">
+                                <property name="title">no active incoming connections</property>
+                                <property name="subtitle">devices connecting to this computer will appear here</property>
+                              </object>
+                            </child>
+                            <style>
+                              <class name="boxed-list" />
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwPreferencesGroup">
+                        <property name="title" translatable="yes">Authorized Devices</property>
                         <property name="header-suffix">
                           <object class="GtkButton">
                             <signal name="clicked" handler="handle_add_cert_fingerprint" swapped="true"/>

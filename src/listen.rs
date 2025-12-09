@@ -55,6 +55,7 @@ pub(crate) struct LanMouseListener {
     conns: Rc<AsyncMutex<Vec<(SocketAddr, ArcConn)>>>,
     request_port_change: Sender<u16>,
     port_changed: Receiver<Result<u16, ListenerCreationError>>,
+    authorized_keys: Arc<RwLock<HashMap<String, String>>>,
 }
 
 type VerifyPeerCertificateFn = Arc<
@@ -84,14 +85,18 @@ impl LanMouseListener {
                         .iter()
                         .map(|c| crypto::generate_fingerprint(c))
                         .collect::<Vec<_>>();
-                    if authorized
+                    let fp = &fingerprints[0];
+                    let is_authorized = authorized
                         .read()
                         .expect("lock")
-                        .contains_key(&fingerprints[0])
-                    {
+                        .contains_key(fp);
+                    log::debug!("DTLS handshake: fingerprint {} - authorized: {}", fp, is_authorized);
+                    if is_authorized {
+                        log::info!("✓ DTLS handshake accepted for authorized device: {}", fp);
                         Ok(())
                     } else {
                         let fingerprint = fingerprints.into_iter().next().expect("fingerprint");
+                        log::warn!("✗ DTLS handshake rejected for unauthorized device: {}", fingerprint);
                         connection_attempts
                             .lock()
                             .expect("lock")
@@ -183,6 +188,7 @@ impl LanMouseListener {
             listen_task,
             port_changed,
             request_port_change,
+            authorized_keys,
         })
     }
 
@@ -232,6 +238,24 @@ impl LanMouseListener {
             None
         }
     }
+
+    pub(crate) async fn close_connection(&self, addr: SocketAddr) {
+        let mut conns = self.conns.lock().await;
+        if let Some((_, conn)) = conns.iter().find(|(a, _)| *a == addr) {
+            // Close the connection BEFORE removing it
+            // This way the Arc reference in read_loop also sees the close
+            let _ = conn.close().await;
+            log::info!("Closed DTLS connection to {addr}");
+        }
+        // Now remove from the list
+        if let Some(index) = conns.iter().position(|(a, _)| *a == addr) {
+            conns.remove(index);
+        }
+    }
+
+    pub(crate) fn is_authorized(&self, fingerprint: &str) -> bool {
+        self.authorized_keys.read().expect("lock").contains_key(fingerprint)
+    }
 }
 
 impl Stream for LanMouseListener {
@@ -266,10 +290,10 @@ async fn read_loop(
     }
     log::info!("dtls client disconnected {addr:?}");
     let mut conns = conns.lock().await;
-    let index = conns
-        .iter()
-        .position(|(a, _)| *a == addr)
-        .expect("connection not found");
-    conns.remove(index);
+    if let Some(index) = conns.iter().position(|(a, _)| *a == addr) {
+        conns.remove(index);
+    } else {
+        log::debug!("connection {addr} already removed from conns list");
+    }
     Ok(())
 }

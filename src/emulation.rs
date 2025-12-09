@@ -58,6 +58,8 @@ enum EmulationRequest {
     Reenable,
     Release(SocketAddr),
     ChangePort(u16),
+    SetPointerScale(SocketAddr, Option<f64>),
+    CloseConnection(SocketAddr),
     Terminate,
 }
 
@@ -101,6 +103,18 @@ impl Emulation {
             .expect("channel closed")
     }
 
+    pub(crate) fn set_pointer_scale(&self, addr: SocketAddr, scale: Option<f64>) {
+        self.request_tx
+            .send(EmulationRequest::SetPointerScale(addr, scale))
+            .expect("channel closed")
+    }
+
+    pub(crate) fn close_connection(&self, addr: SocketAddr) {
+        self.request_tx
+            .send(EmulationRequest::CloseConnection(addr))
+            .expect("channel closed")
+    }
+
     pub(crate) async fn event(&mut self) -> EmulationEvent {
         self.event_rx.recv().await.expect("channel closed")
     }
@@ -138,10 +152,20 @@ impl ListenTask {
                         match event {
                             ProtoEvent::Enter(pos) => {
                                 if let Some(fingerprint) = self.listener.get_certificate_fingerprint(addr).await {
-                                    log::info!("releasing capture: {addr} entered this device");
-                                    self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
-                                    self.listener.reply(addr, ProtoEvent::Ack(0)).await;
-                                    self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                    // Check if this fingerprint is still authorized before accepting
+                                    log::debug!("Enter event from {addr}, fingerprint: {}, checking authorization...", fingerprint);
+                                    if self.listener.is_authorized(&fingerprint) {
+                                        log::info!("✓ Authorized: releasing capture, {addr} entered this device ({})", fingerprint);
+                                        self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
+                                        self.listener.reply(addr, ProtoEvent::Ack(0)).await;
+                                        self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                    } else {
+                                        log::warn!("✗ REJECTED: Enter from UNAUTHORIZED device: {addr} ({})", fingerprint);
+                                        log::warn!("Closing DTLS connection to unauthorized device {addr}");
+                                        self.listener.close_connection(addr).await;
+                                    }
+                                } else {
+                                    log::warn!("Enter event from {addr} but could not get certificate fingerprint");
                                 }
                             }
                             ProtoEvent::Leave(_) => {
@@ -179,6 +203,12 @@ impl ListenTask {
                         let result = self.listener.port_changed().await;
                         self.event_tx.send(EmulationEvent::PortChanged(result)).expect("channel closed");
                     }
+                    EmulationRequest::SetPointerScale(addr, scale) => {
+                        self.emulation_proxy.set_pointer_scale(addr, scale);
+                    }
+                    EmulationRequest::CloseConnection(addr) => {
+                        self.listener.close_connection(addr).await;
+                    }
                     EmulationRequest::Terminate => break,
                 },
                 _ = interval.tick() => {
@@ -213,6 +243,7 @@ pub(crate) struct EmulationProxy {
 enum ProxyRequest {
     Input(Event, SocketAddr),
     Remove(SocketAddr),
+    SetPointerScale(SocketAddr, Option<f64>),
     Terminate,
     Reenable,
 }
@@ -229,6 +260,7 @@ impl EmulationProxy {
             request_rx,
             event_tx,
             handles: Default::default(),
+            pending_scales: Default::default(),
             next_id: 0,
         };
         let task = spawn_local(emulation_task.run());
@@ -273,6 +305,12 @@ impl EmulationProxy {
             .expect("channel closed");
     }
 
+    fn set_pointer_scale(&self, addr: SocketAddr, scale: Option<f64>) {
+        self.request_tx
+            .send(ProxyRequest::SetPointerScale(addr, scale))
+            .expect("channel closed");
+    }
+
     async fn terminate(&mut self) {
         self.exit_requested.replace(true);
         self.request_tx
@@ -288,6 +326,7 @@ struct EmulationTask {
     request_rx: Receiver<ProxyRequest>,
     event_tx: Sender<EmulationEvent>,
     handles: HashMap<SocketAddr, EmulationHandle>,
+    pending_scales: HashMap<SocketAddr, Option<f64>>,
     next_id: EmulationHandle,
 }
 
@@ -307,6 +346,7 @@ impl EmulationTask {
                     ProxyRequest::Terminate => return,
                     ProxyRequest::Input(..) => { /* emulation inactive => ignore */ }
                     ProxyRequest::Remove(..) => { /* emulation inactive => ignore */ }
+                    ProxyRequest::SetPointerScale(..) => { /* emulation inactive => ignore */ }
                 }
             }
         }
@@ -367,6 +407,10 @@ impl EmulationTask {
                                 self.next_id += 1;
                                 emulation.create(handle).await;
                                 self.handles.insert(addr, handle);
+                                // Apply any pending scale for this address
+                                if let Some(&scale) = self.pending_scales.get(&addr) {
+                                    emulation.set_pointer_motion_scale(handle, scale);
+                                }
                                 handle
                             }
                         };
@@ -375,6 +419,15 @@ impl EmulationTask {
                     ProxyRequest::Remove(addr) => {
                         if let Some(handle) = self.handles.remove(&addr) {
                             emulation.destroy(handle).await;
+                        }
+                        self.pending_scales.remove(&addr);
+                    }
+                    ProxyRequest::SetPointerScale(addr, scale) => {
+                        // Store the scale for this address
+                        self.pending_scales.insert(addr, scale);
+                        // If handle already exists, apply immediately
+                        if let Some(&handle) = self.handles.get(&addr) {
+                            emulation.set_pointer_motion_scale(handle, scale);
                         }
                     }
                     ProxyRequest::Terminate => break Ok(()),
@@ -400,6 +453,7 @@ async fn wait_for_termination(rx: &mut Receiver<ProxyRequest>) {
             ProxyRequest::Terminate => return,
             ProxyRequest::Input(_, _) => continue,
             ProxyRequest::Remove(_) => continue,
+            ProxyRequest::SetPointerScale(_, _) => continue,
             ProxyRequest::Reenable => continue,
         }
     }
