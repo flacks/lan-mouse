@@ -162,9 +162,10 @@ fn build_ui(app: &Application) {
                         fingerprint,
                         addr,
                         pos,
+                        pointer_scale,
                     } => {
                         window.show_toast(format!("device entered: {addr} ({pos})").as_str());
-                        window.add_incoming_connection(fingerprint, addr, pos);
+                        window.add_incoming_connection(fingerprint, addr, pos, pointer_scale);
                     }
                     FrontendEvent::IncomingDisconnected(addr) => {
                         window.show_toast(format!("{addr} disconnected").as_str());

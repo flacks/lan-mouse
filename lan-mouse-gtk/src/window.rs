@@ -589,6 +589,7 @@ impl Window {
         fingerprint: String,
         addr: std::net::SocketAddr,
         position: Position,
+        saved_scale: Option<f64>,
     ) {
         // Check if already exists
         if self.incoming_idx(&fingerprint).is_some() {
@@ -609,10 +610,18 @@ impl Window {
             .cloned()
             .unwrap_or_default();
 
-        // Calculate default scale based on screen resolution
-        let default_scale = self.calculate_default_pointer_scale();
+        // Use saved scale if available, otherwise calculate default based on screen resolution
+        let scale = saved_scale.unwrap_or_else(|| {
+            let calculated = self.calculate_default_pointer_scale();
+            log::info!("No saved scale for {}, using calculated default: {:.2}", fingerprint, calculated);
+            calculated
+        });
 
-        let incoming_obj = IncomingObject::new(fingerprint, description, addr, position, default_scale);
+        if saved_scale.is_some() {
+            log::info!("Using saved pointer scale for {}: {:.2}", fingerprint, scale);
+        }
+
+        let incoming_obj = IncomingObject::new(fingerprint, description, addr, position, scale);
         self.incoming().append(&incoming_obj);
     }
 

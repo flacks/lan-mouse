@@ -217,6 +217,7 @@ pub enum FrontendEvent {
         fingerprint: String,
         addr: SocketAddr,
         pos: Position,
+        pointer_scale: Option<f64>,
     },
     /// incoming disconnected
     IncomingDisconnected(SocketAddr),

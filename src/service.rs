@@ -254,6 +254,7 @@ impl Service {
                         fingerprint,
                         addr,
                         pos,
+                        pointer_scale: scale,
                     });
                 } else {
                     self.update_incoming(addr, pos, fingerprint);
@@ -393,11 +394,13 @@ impl Service {
         if changed {
             self.remove_incoming(addr);
             self.add_incoming(addr, pos, fingerprint.clone());
+            let scale = self.incoming_pointer_scales.get(&fingerprint).copied();
             self.notify_frontend(FrontendEvent::IncomingDisconnected(addr));
             self.notify_frontend(FrontendEvent::DeviceEntered {
                 fingerprint,
                 addr,
                 pos,
+                pointer_scale: scale,
             });
         }
     }
