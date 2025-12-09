@@ -449,6 +449,14 @@ impl Service {
         // Update config with incoming pointer scales
         self.config.set_incoming_pointer_scales(self.incoming_pointer_scales.clone());
         
+        // Update config with current clients
+        let client_states = self.client_manager.get_client_states();
+        let toml_clients: Vec<crate::config::TomlClient> = client_states
+            .iter()
+            .map(|(_handle, config, state)| crate::config::TomlClient::from_config_state(config, state))
+            .collect();
+        self.config.set_clients(toml_clients);
+        
         // Save to disk
         if let Err(e) = self.config.save() {
             log::error!("Failed to save config: {}", e);
@@ -488,6 +496,7 @@ impl Service {
         let handle = self.client_manager.add_client();
         log::info!("added client {handle}");
         let (c, s) = self.client_manager.get_state(handle).unwrap();
+        self.save_config();
         self.notify_frontend(FrontendEvent::Created(handle, c, s));
     }
 
@@ -497,6 +506,7 @@ impl Service {
         } else {
             self.deactivate_client(handle);
         }
+        self.save_config();
     }
 
     fn deactivate_client(&mut self, handle: ClientHandle) {
@@ -551,11 +561,13 @@ impl Service {
         {
             self.capture.destroy(handle);
         }
+        self.save_config();
         self.notify_frontend(FrontendEvent::Deleted(handle));
     }
 
     fn update_fix_ips(&mut self, handle: ClientHandle, fix_ips: Vec<IpAddr>) {
         self.client_manager.set_fix_ips(handle, fix_ips);
+        self.save_config();
         self.broadcast_client(handle);
     }
 
@@ -564,11 +576,13 @@ impl Service {
         if self.client_manager.set_hostname(handle, hostname.clone()) {
             self.resolve(handle);
         }
+        self.save_config();
         self.broadcast_client(handle);
     }
 
     fn update_port(&mut self, handle: ClientHandle, port: u16) {
         self.client_manager.set_port(handle, port);
+        self.save_config();
         self.broadcast_client(handle);
     }
 
@@ -578,17 +592,20 @@ impl Service {
             self.deactivate_client(handle);
             self.activate_client(handle);
         }
+        self.save_config();
         self.broadcast_client(handle);
     }
 
     fn update_enter_hook(&mut self, handle: ClientHandle, enter_hook: Option<String>) {
         self.client_manager.set_enter_hook(handle, enter_hook);
+        self.save_config();
         self.broadcast_client(handle);
     }
 
     fn update_pointer_motion_scale(&mut self, handle: ClientHandle, scale: Option<f64>) {
         log::info!("Updating pointer motion scale for client handle {}: {:?}", handle, scale);
         self.client_manager.set_pointer_motion_scale(handle, scale);
+        self.save_config();
         
         // Apply the scale to any active incoming connections from this client's IPs
         if let Some((_config, state)) = self.client_manager.get_state(handle) {

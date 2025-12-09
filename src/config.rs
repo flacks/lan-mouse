@@ -58,15 +58,35 @@ struct ConfigToml {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-struct TomlClient {
-    hostname: Option<String>,
-    host_name: Option<String>,
-    ips: Option<Vec<IpAddr>>,
-    port: Option<u16>,
-    position: Option<Position>,
-    activate_on_startup: Option<bool>,
-    enter_hook: Option<String>,
-    pointer_motion_scale: Option<f64>,
+pub struct TomlClient {
+    pub hostname: Option<String>,
+    pub host_name: Option<String>,
+    pub ips: Option<Vec<IpAddr>>,
+    pub port: Option<u16>,
+    pub position: Option<Position>,
+    pub activate_on_startup: Option<bool>,
+    pub enter_hook: Option<String>,
+    pub pointer_motion_scale: Option<f64>,
+}
+
+impl TomlClient {
+    /// Create from ClientConfig and ClientState
+    pub fn from_config_state(config: &lan_mouse_ipc::ClientConfig, state: &lan_mouse_ipc::ClientState) -> Self {
+        Self {
+            hostname: config.hostname.clone(),
+            host_name: None,
+            ips: if config.fix_ips.is_empty() {
+                None
+            } else {
+                Some(config.fix_ips.iter().cloned().collect())
+            },
+            port: Some(config.port),
+            position: Some(config.pos),
+            activate_on_startup: Some(state.active),
+            enter_hook: config.cmd.clone(),
+            pointer_motion_scale: config.pointer_motion_scale,
+        }
+    }
 }
 
 impl ConfigToml {
@@ -453,6 +473,26 @@ impl Config {
             .as_ref()
             .and_then(|c| c.incoming_pointer_scales.clone())
             .unwrap_or_default()
+    }
+
+    /// update clients list
+    pub fn set_clients(&mut self, clients: Vec<TomlClient>) {
+        if let Some(ref mut config) = self.config_toml {
+            config.clients = Some(clients);
+        } else {
+            // Create new config if none exists
+            self.config_toml = Some(ConfigToml {
+                capture_backend: None,
+                emulation_backend: None,
+                port: None,
+                release_bind: None,
+                cert_path: None,
+                clients: Some(clients),
+                authorized_fingerprints: None,
+                pointer_motion_scale: None,
+                incoming_pointer_scales: None,
+            });
+        }
     }
 
     /// save config to disk
