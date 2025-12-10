@@ -2599,7 +2599,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reis"
 version = "0.5.0"
-source = "git+https://github.com/flacks/reis.git?branch=feature%2Fgesture-bypass#8c708092e7161beed6265eab33eee4938684a19f"
+source = "git+https://github.com/flacks/reis.git?branch=dev#e1e29baa263a06747145d6e902270a4ec3110d12"
 dependencies = [
  "enumflags2",
  "futures",

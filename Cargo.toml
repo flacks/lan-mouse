@@ -98,4 +98,4 @@ icon = ["target/icon.icns"]
 identifier = "de.feschber.LanMouse"
 
 [patch.crates-io]
-reis = { git = "https://github.com/flacks/reis.git", branch = "feature/gesture-bypass" }
+reis = { git = "https://github.com/flacks/reis.git", branch = "dev" }
